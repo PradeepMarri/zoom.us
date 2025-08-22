@@ -1,0 +1,121 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"bytes"
+
+	"github.com/zoom-api/mcp-server/config"
+	"github.com/zoom-api/mcp-server/models"
+	"github.com/mark3labs/mcp-go/mcp"
+)
+
+func WebinarcreateHandler(cfg *config.APIConfig) func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args, ok := request.Params.Arguments.(map[string]any)
+		if !ok {
+			return mcp.NewToolResultError("Invalid arguments object"), nil
+		}
+		userIdVal, ok := args["userId"]
+		if !ok {
+			return mcp.NewToolResultError("Missing required path parameter: userId"), nil
+		}
+		userId, ok := userIdVal.(string)
+		if !ok {
+			return mcp.NewToolResultError("Invalid path parameter: userId"), nil
+		}
+		queryParams := make([]string, 0)
+		// Handle multiple authentication parameters
+		if cfg.BearerToken != "" {
+			queryParams = append(queryParams, fmt.Sprintf("next_page_token=%s", cfg.BearerToken))
+		}
+		if cfg.APIKey != "" {
+			queryParams = append(queryParams, fmt.Sprintf("page_number=%s", cfg.APIKey))
+		}
+		queryString := ""
+		if len(queryParams) > 0 {
+			queryString = "?" + strings.Join(queryParams, "&")
+		}
+		// Create properly typed request body using the generated schema
+		var requestBody map[string]interface{}
+		
+		// Optimized: Single marshal/unmarshal with JSON tags handling field mapping
+		if argsJSON, err := json.Marshal(args); err == nil {
+			if err := json.Unmarshal(argsJSON, &requestBody); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to convert arguments to request type: %v", err)), nil
+			}
+		} else {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal arguments: %v", err)), nil
+		}
+		
+		bodyBytes, err := json.Marshal(requestBody)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("Failed to encode request body", err), nil
+		}
+		url := fmt.Sprintf("%s/users/%s/webinars%s", cfg.BaseURL, userId, queryString)
+		req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("Failed to create request", err), nil
+		}
+		// Set authentication based on auth type
+		// Handle multiple authentication parameters
+		// API key already added to query string
+		// API key already added to query string
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("Request failed", err), nil
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("Failed to read response body", err), nil
+		}
+
+		if resp.StatusCode >= 400 {
+			return mcp.NewToolResultError(fmt.Sprintf("API error: %s", body)), nil
+		}
+		// Use properly typed response
+		var result interface{}
+		if err := json.Unmarshal(body, &result); err != nil {
+			// Fallback to raw text if unmarshaling fails
+			return mcp.NewToolResultText(string(body)), nil
+		}
+
+		prettyJSON, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("Failed to format JSON", err), nil
+		}
+
+		return mcp.NewToolResultText(string(prettyJSON)), nil
+	}
+}
+
+func CreateWebinarcreateTool(cfg *config.APIConfig) models.Tool {
+	tool := mcp.NewTool("post_users_userId_webinars",
+		mcp.WithDescription("Create a webinar"),
+		mcp.WithString("userId", mcp.Required(), mcp.Description("The user ID or email address of the user. For user-level apps, pass `me` as the value for userId.")),
+		mcp.WithString("agenda", mcp.Description("Input parameter: Webinar description.")),
+		mcp.WithObject("settings", mcp.Description("Input parameter: Create Webinar settings.")),
+		mcp.WithString("start_time", mcp.Description("Input parameter: Webinar start time. We support two formats for `start_time` - local time and GMT.<br> \n\nTo set time as GMT the format should be `yyyy-MM-dd`T`HH:mm:ssZ`.\n\nTo set time using a specific timezone, use `yyyy-MM-dd`T`HH:mm:ss` format and specify the timezone [ID](https://marketplace.zoom.us/docs/api-reference/other-references/abbreviation-lists#timezones) in the `timezone` field OR leave it blank and the timezone set on your Zoom account will be used. You can also set the time as UTC as the timezone field.\n\nThe `start_time` should only be used for scheduled and / or recurring webinars with fixed time.")),
+		mcp.WithString("topic", mcp.Description("Input parameter: Webinar topic.")),
+		mcp.WithString("password", mcp.Description("Input parameter: Webinar passcode. Passcode may only contain the following characters: [a-z A-Z 0-9 @ - _ * !]. Max of 10 characters.\n\nIf \"Require a passcode when scheduling new meetings\" setting has been **enabled** **and** [locked](https://support.zoom.us/hc/en-us/articles/115005269866-Using-Tiered-Settings#locked) for the user, the passcode field will be autogenerated for the Webinar in the response even if it is not provided in the API request. <br><br>\n\n**Note:** If the account owner or the admin has configured [minimum passcode requirement settings](https://support.zoom.us/hc/en-us/articles/360033559832-Meeting-and-webinar-passwords#h_a427384b-e383-4f80-864d-794bf0a37604), the passcode value provided here must meet those requirements. <br><br>If the requirements are enabled, you can view those requirements by calling [Get Account Settings](https://marketplace.zoom.us/docs/api-reference/zoom-api/accounts/accountsettings) API. \n\n\n\n")),
+		mcp.WithObject("recurrence", mcp.Description("Input parameter: Recurrence object. Use this object only for a webinar of type `9` i.e., a recurring webinar with fixed time. ")),
+		mcp.WithArray("tracking_fields", mcp.Description("Input parameter: Tracking fields")),
+		mcp.WithNumber("type", mcp.Description("Input parameter: Webinar Types:<br>`5` - Webinar.<br>`6` - Recurring webinar with no fixed time.<br>`9` - Recurring webinar with a fixed time.")),
+		mcp.WithNumber("duration", mcp.Description("Input parameter: Webinar duration (minutes). Used for scheduled webinars only.")),
+		mcp.WithString("timezone", mcp.Description("Input parameter: Time zone to format start_time. For example, \"America/Los_Angeles\". For scheduled meetings only. Please reference our [timezone](https://marketplace.zoom.us/docs/api-reference/other-references/abbreviation-lists#timezones) list for supported time zones and their formats.")),
+	)
+
+	return models.Tool{
+		Definition: tool,
+		Handler:    WebinarcreateHandler(cfg),
+	}
+}
